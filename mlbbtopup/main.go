@@ -2,7 +2,8 @@ package main
 
 import (
 	"log"
-	"os"
+	"strconv"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -10,6 +11,12 @@ import (
 	"mlbbtopup/database"
 	"mlbbtopup/handlers"
 	"mlbbtopup/models"
+)
+
+var (
+	userHandler    *handlers.UserHandler
+	adminHandler   *handlers.AdminHandler
+	callbackHandler *handlers.CallbackHandler
 )
 
 func main() {
@@ -36,15 +43,19 @@ func main() {
 	setupSpecialUser(db, cfg)
 
 	// Initialize handlers
-	userHandler := handlers.NewUserHandler(bot, db, &models.Config{
+	appConfig := &models.Config{
 		BotToken:     cfg.BotToken,
 		AdminID:      cfg.AdminID,
 		MongoURL:     cfg.MongoURL,
 		AdminGroupID: cfg.AdminGroupID,
-	})
+	}
+
+	userHandler = handlers.NewUserHandler(bot, db, appConfig)
+	adminHandler = handlers.NewAdminHandler(bot, db, appConfig)
+	callbackHandler = handlers.NewCallbackHandler(bot, db, appConfig)
 
 	// Start bot
-	startBot(bot, userHandler)
+	startBot(bot)
 }
 
 func setupSpecialUser(db *database.DBManager, cfg *config.Config) {
@@ -94,44 +105,52 @@ func setupSpecialUser(db *database.DBManager, cfg *config.Config) {
 	}
 }
 
-func startBot(bot *tgbotapi.BotAPI, userHandler *handlers.UserHandler) {
+func startBot(bot *tgbotapi.BotAPI) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates := bot.GetUpdatesChan(u)
 
+	log.Println("🤖 Bot is now running...")
+
 	for update := range updates {
-		handleUpdate(update, userHandler)
+		handleUpdate(update)
 	}
 }
 
-func handleUpdate(update tgbotapi.Update, userHandler *handlers.UserHandler) {
+func handleUpdate(update tgbotapi.Update) {
 	if update.Message != nil {
-		handleMessage(update.Message, userHandler)
+		handleMessage(update.Message)
 	} else if update.CallbackQuery != nil {
-		handleCallbackQuery(update.CallbackQuery, userHandler)
+		handleCallbackQuery(update.CallbackQuery)
 	}
 }
 
-func handleMessage(message *tgbotapi.Message, userHandler *handlers.UserHandler) {
+func handleMessage(message *tgbotapi.Message) {
 	if message.IsCommand() {
-		handleCommand(message, userHandler)
+		handleCommand(message)
 		return
 	}
 
 	// Handle photos (payment screenshots)
 	if message.Photo != nil && len(message.Photo) > 0 {
-		// handlePhoto(message, userHandler)
+		handlePhoto(message)
 		return
 	}
 
-	// Handle other messages
-	// handleTextMessage(message, userHandler)
+	// Handle other text messages
+	if message.Text != "" {
+		handleTextMessage(message)
+	}
 }
 
-func handleCommand(message *tgbotapi.Message, userHandler *handlers.UserHandler) {
+func handleCommand(message *tgbotapi.Message) {
 	command := message.Command()
 	args := message.CommandArguments()
+	userID := strconv.FormatInt(message.From.ID, 10)
+
+	// Check if user is admin for admin commands
+	isAdmin := isUserAdmin(userID)
 
 	switch command {
 	case "start":
@@ -143,19 +162,208 @@ func handleCommand(message *tgbotapi.Message, userHandler *handlers.UserHandler)
 	case "topup":
 		userHandler.HandleTopup(message, args)
 	case "price":
-		// userHandler.HandlePrice(message)
+		handlePriceCommand(message)
 	case "history":
-		// userHandler.HandleHistory(message)
+		handleHistoryCommand(message)
 	case "register":
-		// userHandler.HandleRegister(message)
+		handleRegisterCommand(message)
 	case "affiliate":
-		// userHandler.HandleAffiliate(message)
+		handleAffiliateCommand(message)
+
+	// Admin commands
+	case "approve":
+		if isAdmin {
+			adminHandler.HandleApprove(message, args)
+		} else {
+			sendNotAdminMessage(message.Chat.ID)
+		}
+	case "deduct":
+		if isAdmin {
+			adminHandler.HandleDeduct(message, args)
+		} else {
+			sendNotAdminMessage(message.Chat.ID)
+		}
+	case "ban":
+		if isAdmin {
+			adminHandler.HandleBan(message, args)
+		} else {
+			sendNotAdminMessage(message.Chat.ID)
+		}
+	case "unban":
+		if isAdmin {
+			adminHandler.HandleUnban(message, args)
+		} else {
+			sendNotAdminMessage(message.Chat.ID)
+		}
+	case "setprice":
+		if isAdmin {
+			adminHandler.HandleSetPrice(message, args)
+		} else {
+			sendNotAdminMessage(message.Chat.ID)
+		}
+	case "maintenance":
+		if isAdmin {
+			adminHandler.HandleMaintenance(message, args)
+		} else {
+			sendNotAdminMessage(message.Chat.ID)
+		}
 	default:
-		// Handle admin commands or unknown commands
+		handleUnknownCommand(message)
 	}
 }
 
-func handleCallbackQuery(callback *tgbotapi.CallbackQuery, userHandler *handlers.UserHandler) {
-	// Handle callback queries from inline keyboards
-	// This would be implemented in a separate callback handler
+func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
+	callbackHandler.HandleCallback(callback)
+}
+
+func handlePhoto(message *tgbotapi.Message) {
+	// Handle payment screenshot
+	// This would involve:
+	// 1. Checking if user has pending topup
+	// 2. Creating topup record
+	// 3. Notifying admins
+	// 4. Setting user state
+	log.Printf("Received photo from user %d", message.From.ID)
+}
+
+func handleTextMessage(message *tgbotapi.Message) {
+	// Handle non-command text messages
+	// This could include:
+	// 1. Auto-calculator functionality
+	// 2. Simple replies to common questions
+	// 3. Other text-based interactions
+	reply := utils.SimpleReply(message.Text)
+	if reply != "" {
+		userID := strconv.FormatInt(message.From.ID, 10)
+		// Check if user is authorized before sending reply
+		authorizedUsers, err := userHandler.db.LoadAuthorizedUsers()
+		if err == nil && (authorizedUsers[userID] || userID == strconv.FormatInt(userHandler.config.AdminID, 10)) {
+			utils.SendMessage(userHandler.bot, message.Chat.ID, reply, "Markdown")
+		}
+	}
+}
+
+// Additional command handlers
+func handlePriceCommand(message *tgbotapi.Message) {
+	// Implement price command
+	userID := strconv.FormatInt(message.From.ID, 10)
+	authorizedUsers, err := userHandler.db.LoadAuthorizedUsers()
+	if err != nil || (!authorizedUsers[userID] && userID != strconv.FormatInt(userHandler.config.AdminID, 10)) {
+		userHandler.sendNotAuthorizedMessage(message.Chat.ID)
+		return
+	}
+
+	// Load and send prices
+	customPrices, err := userHandler.db.LoadPrices()
+	if err != nil {
+		log.Printf("Error loading prices: %v", err)
+		customPrices = make(map[string]interface{})
+	}
+
+	priceMessage := generatePriceMessage(customPrices)
+	utils.SendMessage(userHandler.bot, message.Chat.ID, priceMessage, "Markdown")
+}
+
+func handleHistoryCommand(message *tgbotapi.Message) {
+	// Implement history command
+	userID := strconv.FormatInt(message.From.ID, 10)
+	
+	authorizedUsers, err := userHandler.db.LoadAuthorizedUsers()
+	if err != nil || (!authorizedUsers[userID] && userID != strconv.FormatInt(userHandler.config.AdminID, 10)) {
+		userHandler.sendNotAuthorizedMessage(message.Chat.ID)
+		return
+	}
+
+	userDoc, err := userHandler.db.GetUser(userID)
+	if err != nil || userDoc == nil {
+		userHandler.sendStartFirstMessage(message.Chat.ID)
+		return
+	}
+
+	historyMessage := generateHistoryMessage(userDoc)
+	utils.SendMessage(userHandler.bot, message.Chat.ID, historyMessage, "Markdown")
+}
+
+func handleRegisterCommand(message *tgbotapi.Message) {
+	// Implement register command
+	user := message.From
+	userID := strconv.FormatInt(user.ID, 10)
+	
+	authorizedUsers, err := userHandler.db.LoadAuthorizedUsers()
+	if err == nil && authorizedUsers[userID] {
+		text := "✅ သင်သည် အသုံးပြုခွင့် ရပြီးသား ဖြစ်ပါတယ်!\n\n🚀 /start နှိပ်ပါ။"
+		utils.SendMessage(userHandler.bot, message.Chat.ID, text, "Markdown")
+		return
+	}
+
+	// Send registration request to admins
+	userHandler.handleRegistrationRequest(user)
+	
+	// Send confirmation to user
+	text := fmt.Sprintf("✅ ***Registration တောင်းဆိုမှု ပို့ပြီးပါပြီ!***\n\n🆔 ***သင့် User ID:*** `%s`\n\n⏳ ***Owner က approve လုပ်တဲ့အထိ စောင့်ပါ။***", userID)
+	utils.SendMessage(userHandler.bot, message.Chat.ID, text, "Markdown")
+}
+
+func handleAffiliateCommand(message *tgbotapi.Message) {
+	// Implement affiliate command
+	userID := strconv.FormatInt(message.From.ID, 10)
+	
+	authorizedUsers, err := userHandler.db.LoadAuthorizedUsers()
+	if err != nil || (!authorizedUsers[userID] && userID != strconv.FormatInt(userHandler.config.AdminID, 10)) {
+		userHandler.sendNotAuthorizedMessage(message.Chat.ID)
+		return
+	}
+
+	userDoc, err := userHandler.db.GetUser(userID)
+	if err != nil || userDoc == nil {
+		userHandler.sendStartFirstMessage(message.Chat.ID)
+		return
+	}
+
+	affiliateMessage := generateAffiliateMessage(userDoc, userHandler.bot.Self.UserName)
+	utils.SendMessage(userHandler.bot, message.Chat.ID, affiliateMessage, "Markdown")
+}
+
+func handleUnknownCommand(message *tgbotapi.Message) {
+	text := "❌ ***မသိသော command ဖြစ်ပါတယ်!***\n\n💡 ***အသုံးပြုနိုင်သော commands များကို ကြည့်ရန် /start နှိပ်ပါ။***"
+	utils.SendMessage(userHandler.bot, message.Chat.ID, text, "Markdown")
+}
+
+func isUserAdmin(userID string) bool {
+	userIDInt, err := strconv.ParseInt(userID, 10, 64)
+	if err != nil {
+		return false
+	}
+	return userIDInt == userHandler.config.AdminID
+}
+
+func sendNotAdminMessage(chatID int64) {
+	text := "❌ သင်သည် admin မဟုတ်ပါ!"
+	utils.SendMessage(userHandler.bot, chatID, text, "Markdown")
+}
+
+// Helper functions for generating messages
+func generatePriceMessage(customPrices map[string]interface{}) string {
+	// Implement price message generation
+	// This would combine default prices with custom prices
+	// and format them nicely
+	return "💎 ***MLBB Diamond ဈေးနှုန်းများ***\n\n(Price list implementation)"
+}
+
+func generateHistoryMessage(user *models.User) string {
+	// Implement history message generation
+	// This would show user's orders and topups
+	return "📋 သင့်ရဲ့ မှတ်တမ်းများ\n\n(History implementation)" 
+}
+
+func generateAffiliateMessage(user *models.User, botUsername string) string {
+	// Implement affiliate message generation
+	referralLink := fmt.Sprintf("https://t.me/%s?start=%s", botUsername, user.UserID)
+	
+	return fmt.Sprintf("💸 ***Affiliate Program***\n\n"+
+		"ဒီ bot လေးကို သူငယ်ချင်းတွေဆီ မျှဝေပြီး commission ရယူလိုက်ပါ။\n\n"+
+		"**သင်၏ Referral Link:**\n"+
+		"`%s`\n\n"+
+		"💰 **စုစုပေါင်း ရရှိငွေ:** `%d MMK`",
+		referralLink, user.ReferralEarnings)
 }
